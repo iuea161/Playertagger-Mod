@@ -8,12 +8,14 @@ import net.minecraft.client.gui.FontRenderer;
 import net.minecraft.client.gui.Gui;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.network.NetworkPlayerInfo;
+import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ChatComponentText;
 
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 public class AlertManager {
@@ -59,29 +61,20 @@ public class AlertManager {
 
                 // Scan players (Only if alerts are enabled and we have tags)
                 if (PlayerTaggerConfig.alertsEnabled && tagManager.hasAnyTags()) {
-                    // 1. Scan players safely from world list using safe array copy
                     List<EntityPlayer> playerList = mc.theWorld.playerEntities;
                     if (playerList != null) {
-                        EntityPlayer[] playersCopy;
-                        synchronized (playerList) {
-                            playersCopy = playerList.toArray(new EntityPlayer[0]);
-                        }
-                        for (EntityPlayer player : playersCopy) {
+                        for (int i = 0; i < playerList.size(); i++) {
+                            EntityPlayer player = playerList.get(i);
                             if (player != null && player.getName() != null) {
                                 checkAndTriggerAlert(player.getName(), tagManager);
                             }
                         }
                     }
 
-                    // 2. Scan players from network tab list using safe array copy
                     if (mc.getNetHandler() != null) {
                         Collection<NetworkPlayerInfo> playerInfoMap = mc.getNetHandler().getPlayerInfoMap();
                         if (playerInfoMap != null && !playerInfoMap.isEmpty()) {
-                            NetworkPlayerInfo[] infoArray;
-                            synchronized (playerInfoMap) {
-                                infoArray = playerInfoMap.toArray(new NetworkPlayerInfo[0]);
-                            }
-                            for (NetworkPlayerInfo info : infoArray) {
+                            for (NetworkPlayerInfo info : playerInfoMap) {
                                 if (info != null && info.getGameProfile() != null && info.getGameProfile().getName() != null) {
                                     checkAndTriggerAlert(info.getGameProfile().getName(), tagManager);
                                 }
@@ -96,13 +89,11 @@ public class AlertManager {
     private void checkAndTriggerAlert(String name, TagManager tagManager) {
         try {
             if (name == null || name.isEmpty()) return;
-            String clean = name.toLowerCase();
-
-            if (alertedPlayers.contains(clean)) return;
-
             TaggedPlayer tag = tagManager.getTaggedPlayer(name);
-            if (tag != null) {
-                alertedPlayers.add(clean);
+            if (tag == null) return;
+
+            String clean = name.toLowerCase(Locale.ROOT);
+            if (alertedPlayers.add(clean)) {
                 showAlert(tag);
             }
         } catch (Exception ignored) {}
@@ -158,6 +149,7 @@ public class AlertManager {
             Gui.drawRect(x - 8, y - 4, x + textWidth + 8, y - 3, 0xFFFF5555);
 
             font.drawString(activeAlertMessage, x, y, 0xFFFFFF);
+            GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
         } catch (Exception ignored) {}
     }
 }

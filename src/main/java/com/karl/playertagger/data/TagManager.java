@@ -34,19 +34,28 @@ public class TagManager {
         }
     });
 
+    private static final TaggedPlayer NO_TAG_SENTINEL = new TaggedPlayer();
+    private static final int MAX_LOOKUP_CACHE_SIZE = 1024;
+
     private final Map<String, TaggedPlayer> localTags = new ConcurrentHashMap<String, TaggedPlayer>();
     private final Map<String, TaggedPlayer> remoteTags = new ConcurrentHashMap<String, TaggedPlayer>();
-    private final Set<String> localHiddenPlayers = Collections.synchronizedSet(new HashSet<String>());
+    private final Set<String> localHiddenPlayers = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, TaggedPlayer> exactLookupCache = new ConcurrentHashMap<String, TaggedPlayer>();
 
     private File localFile;
     private File hiddenFile;
-    private long lastSyncTime = 0;
-    private boolean isSyncing = false;
+    private volatile boolean lastFirebaseEnabled = PlayerTaggerConfig.firebaseEnabled;
+    private volatile long lastSyncTime = 0;
+    private volatile boolean isSyncing = false;
 
     private TagManager() {}
 
     public static TagManager getInstance() {
         return INSTANCE;
+    }
+
+    public void invalidateLookupCache() {
+        exactLookupCache.clear();
     }
 
     public void init(File configDir) {
@@ -70,29 +79,45 @@ public class TagManager {
     }
 
     public TaggedPlayer getTaggedPlayer(String username) {
-        if (username == null || (!hasAnyTags())) return null;
-        String cleanName = username.toLowerCase();
+        if (username == null || !hasAnyTags()) return null;
 
-        if (!localHiddenPlayers.isEmpty() && localHiddenPlayers.contains(cleanName)) {
-            return null;
+        boolean firebaseOn = PlayerTaggerConfig.firebaseEnabled;
+        if (firebaseOn != lastFirebaseEnabled) {
+            lastFirebaseEnabled = firebaseOn;
+            exactLookupCache.clear();
         }
 
-        TaggedPlayer local = localTags.get(cleanName);
-        if (local != null) return local;
-
-        if (PlayerTaggerConfig.firebaseEnabled) {
-            return remoteTags.get(cleanName);
+        TaggedPlayer cached = exactLookupCache.get(username);
+        if (cached != null) {
+            return cached == NO_TAG_SENTINEL ? null : cached;
         }
-        return null;
+
+        String cleanName = username.toLowerCase(Locale.ROOT);
+        TaggedPlayer resolved = null;
+
+        if (localHiddenPlayers.isEmpty() || !localHiddenPlayers.contains(cleanName)) {
+            resolved = localTags.get(cleanName);
+            if (resolved == null && firebaseOn) {
+                resolved = remoteTags.get(cleanName);
+            }
+        }
+
+        if (exactLookupCache.size() >= MAX_LOOKUP_CACHE_SIZE) {
+            exactLookupCache.clear();
+        }
+        exactLookupCache.put(username, resolved != null ? resolved : NO_TAG_SENTINEL);
+        return resolved;
     }
 
     public void addPlayer(TaggedPlayer player) {
         if (player == null || player.getName() == null) return;
-        String cleanName = player.getName().trim().toLowerCase();
-        localHiddenPlayers.remove(cleanName);
-        saveHiddenPlayers();
+        String cleanName = player.getName().trim().toLowerCase(Locale.ROOT);
+        if (localHiddenPlayers.remove(cleanName)) {
+            saveHiddenPlayers();
+        }
 
         localTags.put(cleanName, player);
+        invalidateLookupCache();
         saveLocalTags();
 
         if (PlayerTaggerConfig.firebaseEnabled && PlayerTaggerConfig.firebaseAutoUpload) {
@@ -102,7 +127,7 @@ public class TagManager {
 
     public boolean removePlayer(String username) {
         if (username == null) return false;
-        String cleanName = username.trim().toLowerCase();
+        String cleanName = username.trim().toLowerCase(Locale.ROOT);
 
         boolean wasRemoved = localTags.remove(cleanName) != null;
         if (remoteTags.containsKey(cleanName)) {
@@ -112,6 +137,7 @@ public class TagManager {
         }
 
         if (wasRemoved) {
+            invalidateLookupCache();
             saveLocalTags();
             com.karl.playertagger.render.TabListHandler.resetPlayer(cleanName);
             if (PlayerTaggerConfig.firebaseEnabled && PlayerTaggerConfig.firebaseAutoUpload) {
@@ -149,9 +175,10 @@ public class TagManager {
                 localTags.clear();
                 for (Map.Entry<String, TaggedPlayer> entry : loaded.entrySet()) {
                     if (entry.getValue() != null) {
-                        localTags.put(entry.getKey().toLowerCase(), entry.getValue());
+                        localTags.put(entry.getKey().toLowerCase(Locale.ROOT), entry.getValue());
                     }
                 }
+                invalidateLookupCache();
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -175,8 +202,9 @@ public class TagManager {
             if (loaded != null) {
                 localHiddenPlayers.clear();
                 for (String s : loaded) {
-                    localHiddenPlayers.add(s.toLowerCase());
+                    localHiddenPlayers.add(s.toLowerCase(Locale.ROOT));
                 }
+                invalidateLookupCache();
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -215,7 +243,7 @@ public class TagManager {
         return urlStr;
     }
 
-    private long lastSyncAttemptTime = 0;
+    private volatile long lastSyncAttemptTime = 0;
 
     public void syncFromFirebase(final boolean notifyInChat) {
         long now = System.currentTimeMillis();
@@ -262,6 +290,7 @@ public class TagManager {
                         String responseBody = response.toString().trim();
                         if (responseBody.equals("null") || responseBody.isEmpty()) {
                             remoteTags.clear();
+                            invalidateLookupCache();
                             if (notifyInChat) {
                                 sendChatMsg("§e[PlayerTagger] Google Firebase Datenbank ist aktuell leer.");
                             }
@@ -467,6 +496,7 @@ public class TagManager {
 
             remoteTags.clear();
             remoteTags.putAll(parsed);
+            invalidateLookupCache();
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -475,15 +505,22 @@ public class TagManager {
     private void seedSampleEntries() {
         TaggedPlayer sample1 = new TaggedPlayer("SweatyPlayer99", "BedWars", "500★ / Fireball God", "§6", "⚡", "Sweat", 4, false);
         TaggedPlayer sample2 = new TaggedPlayer("BHopper_X", "SkyWars", "Blatant Fly & Killaura", "§c", "☠", "Cheater", 5, false);
-        localTags.put(sample1.getName().toLowerCase(), sample1);
-        localTags.put(sample2.getName().toLowerCase(), sample2);
+        localTags.put(sample1.getName().toLowerCase(Locale.ROOT), sample1);
+        localTags.put(sample2.getName().toLowerCase(Locale.ROOT), sample2);
+        invalidateLookupCache();
     }
 
-    private void sendChatMsg(String msg) {
-        Minecraft mc = Minecraft.getMinecraft();
-        if (mc != null && mc.thePlayer != null) {
-            mc.thePlayer.addChatMessage(new ChatComponentText(msg));
-        }
+    private void sendChatMsg(final String msg) {
+        final Minecraft mc = Minecraft.getMinecraft();
+        if (mc == null) return;
+        mc.addScheduledTask(new Runnable() {
+            @Override
+            public void run() {
+                if (mc.thePlayer != null) {
+                    mc.thePlayer.addChatMessage(new ChatComponentText(msg));
+                }
+            }
+        });
     }
 
     public long getLastSyncTime() {

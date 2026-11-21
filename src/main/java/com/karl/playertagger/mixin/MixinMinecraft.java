@@ -1,5 +1,6 @@
 package com.karl.playertagger.mixin;
 
+import com.karl.playertagger.data.TagManager;
 import com.karl.playertagger.render.AlertManager;
 import com.karl.playertagger.render.TabListHandler;
 import net.minecraft.client.Minecraft;
@@ -20,6 +21,7 @@ public class MixinMinecraft {
 
     @Inject(method = "loadWorld(Lnet/minecraft/client/multiplayer/WorldClient;Ljava/lang/String;)V", at = @At("HEAD"))
     private void playertagger$onLoadWorld(WorldClient worldClientIn, String loadingMessage, CallbackInfo ci) {
+        TagManager.getInstance().invalidateLookupCache();
         TabListHandler.INSTANCE.onWorldChange();
         AlertManager.INSTANCE.onWorldChange(worldClientIn != null);
     }

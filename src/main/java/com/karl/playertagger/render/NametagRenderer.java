@@ -1,131 +1,152 @@
 package com.karl.playertagger.render;
 
 import com.karl.playertagger.config.PlayerTaggerConfig;
-import com.karl.playertagger.data.TagManager;
 import com.karl.playertagger.data.TaggedPlayer;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.FontRenderer;
-import net.minecraft.client.gui.Gui;
 import net.minecraft.client.renderer.GlStateManager;
+import net.minecraft.client.renderer.Tessellator;
+import net.minecraft.client.renderer.WorldRenderer;
 import net.minecraft.client.renderer.entity.RenderManager;
-import net.minecraft.entity.EntityLivingBase;
+import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.scoreboard.Scoreboard;
 import org.lwjgl.opengl.GL11;
 
+/**
+ * Argentum / OneClient-compatible nametag renderer with exact vanilla 1.8.9
+ * visibility, sneaking depth-testing, and F5 camera orientation semantics.
+ *
+ * Key guarantees:
+ * - Standing nametags are delegated to vanilla Render.renderOffsetLivingLabel /
+ *   Render.renderLivingLabel from MixinRendererLivingEntity, giving full compatibility
+ *   with Argentum's NameTagBatch + NameTagInstancing, Sarcio's F5 front-view pitch fix,
+ *   PolyNametag styling, and below-name scoreboard objectives.
+ * - Sneaking nametags keep GL_DEPTH_TEST enabled (no wall X-ray!), use raw
+ *   RenderManager.playerViewY / playerViewX (no double pitch flip in F5 front view),
+ *   draw backgrounds via Tessellator + DefaultVertexFormats.POSITION_COLOR (captured
+ *   by Argentum's NameTagBatch with zero mid-batch flushes), keep GL_BLEND enabled for
+ *   text draws, and restore every GL state inside a try/finally block.
+ */
 public class NametagRenderer {
 
     public static final NametagRenderer INSTANCE = new NametagRenderer();
 
-    public boolean onRenderLivingName(EntityLivingBase entity, double x, double y, double z) {
-        if (!PlayerTaggerConfig.enabled || !PlayerTaggerConfig.nametagTagging) return false;
-        if (!(entity instanceof EntityPlayer)) return false;
+    public static final float VANILLA_NAMETAG_SCALE = 0.016666668F * 1.6F;
+    private static final float SNEAK_TRANSLATE_Y = 0.25F / VANILLA_NAMETAG_SCALE;
 
-        TagManager tagManager = TagManager.getInstance();
-        if (!tagManager.hasAnyTags()) return false;
+    public String resolvePrimaryLine(EntityPlayer player, TaggedPlayer tag) {
+        int style = PlayerTaggerConfig.nametagStyle;
+        boolean colorName = PlayerTaggerConfig.colorNametag;
 
-        EntityPlayer player = (EntityPlayer) entity;
-        Minecraft mc = Minecraft.getMinecraft();
-
-        TaggedPlayer tag = tagManager.getTaggedPlayer(player.getName());
-        if (tag == null) return false;
-
-        if (player == mc.thePlayer) {
-            if (mc.gameSettings != null && mc.gameSettings.thirdPersonView > 0) {
-                renderVanillaStyle2PassNametag(player, tag, x, y, z);
-            }
-        } else {
-            renderVanillaStyle2PassNametag(player, tag, x, y, z);
+        if (style == 2) {
+            // "Nur Farbe"
+            return colorName ? tag.getFormattedName() : player.getDisplayName().getFormattedText();
         }
 
-        // Return true to cancel vanilla nametag rendering
-        return true;
+        if (style == 1) {
+            // "Nur Icon vor Name"
+            return formatIconAndName(player, tag, colorName);
+        }
+
+        // style == 0: "Multi-Zeilen (Titel + Name)"
+        if (PlayerTaggerConfig.showSubBadge && !tag.getFormattedBadge().isEmpty()) {
+            return colorName ? tag.getFormattedName() : player.getDisplayName().getFormattedText();
+        }
+
+        return formatIconAndName(player, tag, colorName);
     }
 
-    private void renderVanillaStyle2PassNametag(EntityPlayer player, TaggedPlayer tag, double x, double y, double z) {
+    public String resolveBadgeLine(TaggedPlayer tag) {
+        if (PlayerTaggerConfig.nametagStyle != 0 || !PlayerTaggerConfig.showSubBadge) {
+            return "";
+        }
+        return tag.getFormattedBadge();
+    }
+
+    private String formatIconAndName(EntityPlayer player, TaggedPlayer tag, boolean colorName) {
+        if (colorName) {
+            return tag.getFormattedIconName();
+        }
+        String icon = tag.getIcon();
+        String baseName = player.getDisplayName().getFormattedText();
+        return icon.isEmpty() ? baseName : icon + " " + baseName;
+    }
+
+    public boolean hasBelowNameObjective(EntityPlayer player) {
+        Scoreboard scoreboard = player.getWorldScoreboard();
+        return scoreboard != null && scoreboard.getObjectiveInDisplaySlot(2) != null;
+    }
+
+    /**
+     * Renders a sneaking player's nametag matching vanilla 1.8.9 RendererLivingEntity.renderName:
+     * - Depth test stays ENABLED (depthMask(false) only) so sneaking tags cannot be X-rayed through walls.
+     * - Raw rm.playerViewY / rm.playerViewX (no manual negation that would fight Sarcio's F5 fix).
+     * - Backgrounds batched in a single Tessellator draw using DefaultVertexFormats.POSITION_COLOR so
+     *   Argentum's NameTagBatch captures them without flushing.
+     * - GL_BLEND remains enabled for FontRenderer.drawString so Argentum coalesces text passes cleanly.
+     */
+    public void renderSneakingNametag(
+            RenderManager rm,
+            FontRenderer font,
+            EntityPlayer player,
+            String primaryLine,
+            String badgeLine,
+            double x,
+            double y,
+            double z
+    ) {
+        if (rm == null || font == null) return;
+
+        boolean hasBadge = badgeLine != null && !badgeLine.isEmpty();
+        int primaryHalfWidth = font.getStringWidth(primaryLine) / 2;
+        int badgeHalfWidth = hasBadge ? (font.getStringWidth(badgeLine) / 2) : 0;
+
+        float yOffset = player.height + 0.5F - (player.isChild() ? player.height / 2.0F : 0.0F);
+
+        GlStateManager.pushMatrix();
         try {
-            Minecraft mc = Minecraft.getMinecraft();
-            RenderManager rm = mc.getRenderManager();
-            if (rm == null) return;
-
-            FontRenderer font = mc.fontRendererObj;
-            if (font == null) return;
-
-            float distance = player.getDistanceToEntity(mc.thePlayer);
-            // Sneaking players have a shorter visibility range in vanilla (32 blocks)
-            float maxDist = player.isSneaking() ? 32.0F : 64.0F;
-            if (distance > maxDist) return;
-
-            // Vanilla 1.8.9 exact scale & distance positioning
-            float baseScale = 0.016666668F * 1.6F;
-            float yOffset = player.height + 0.55F - (player.isSneaking() ? 0.25F : 0.0F);
-
-            // Correct pitch angle for front-view F5 mode (thirdPersonView == 2) on all clients
-            float viewX = rm.playerViewX;
-            if (mc.gameSettings != null && mc.gameSettings.thirdPersonView == 2) {
-                viewX = -viewX;
-            }
-
-            GlStateManager.pushMatrix();
             GlStateManager.translate((float) x, (float) y + yOffset, (float) z);
             GL11.glNormal3f(0.0F, 1.0F, 0.0F);
             GlStateManager.rotate(-rm.playerViewY, 0.0F, 1.0F, 0.0F);
-            GlStateManager.rotate(viewX, 1.0F, 0.0F, 0.0F);
-            GlStateManager.scale(-baseScale, -baseScale, baseScale);
+            GlStateManager.rotate(rm.playerViewX, 1.0F, 0.0F, 0.0F);
+            GlStateManager.scale(-VANILLA_NAMETAG_SCALE, -VANILLA_NAMETAG_SCALE, VANILLA_NAMETAG_SCALE);
+            GlStateManager.translate(0.0F, SNEAK_TRANSLATE_Y, 0.0F);
 
             GlStateManager.disableLighting();
+            GlStateManager.enableDepth();
+            GlStateManager.depthMask(false);
             GlStateManager.enableBlend();
             GlStateManager.tryBlendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, 1, 0);
 
-            String badge = (PlayerTaggerConfig.showSubBadge) ? tag.getFormattedBadge() : "";
-            String name = (PlayerTaggerConfig.colorNametag) ? tag.getFormattedName() : player.getDisplayName().getFormattedText();
-
-            boolean hasBadge = !badge.isEmpty();
-
+            GlStateManager.disableTexture2D();
+            Tessellator tessellator = Tessellator.getInstance();
+            WorldRenderer wr = tessellator.getWorldRenderer();
+            wr.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_COLOR);
+            addBackgroundQuad(wr, primaryHalfWidth, 0);
             if (hasBadge) {
-                int badgeWidth = font.getStringWidth(badge) / 2;
-                int nameWidth = font.getStringWidth(name) / 2;
-
-                // --- PASS 1: Render behind walls (translucent name, like vanilla) ---
-                GlStateManager.depthMask(false);
-                GlStateManager.disableDepth();
-
-                Gui.drawRect(-badgeWidth - 2, -12, badgeWidth + 2, -2, 0x40000000);
-                font.drawString(badge, -badgeWidth, -11, 0x20FFFFFF, false);
-
-                Gui.drawRect(-nameWidth - 2, 0, nameWidth + 2, 10, 0x40000000);
-                font.drawString(name, -nameWidth, 1, 0x20FFFFFF, false);
-
-                // --- PASS 2: Render in front of walls (bright color) ---
-                GlStateManager.enableDepth();
-                GlStateManager.depthMask(true);
-
-                font.drawString(badge, -badgeWidth, -11, 0xFFFFFFFF, false);
-                font.drawString(name, -nameWidth, 1, 0xFFFFFFFF, false);
-            } else {
-                // Single line
-                String singleLine = (tag.getIcon().isEmpty() ? "" : tag.getIcon() + " ") + name;
-                int nameWidth = font.getStringWidth(singleLine) / 2;
-
-                // --- PASS 1: Render behind walls (translucent) ---
-                GlStateManager.depthMask(false);
-                GlStateManager.disableDepth();
-
-                Gui.drawRect(-nameWidth - 2, -2, nameWidth + 2, 8, 0x40000000);
-                font.drawString(singleLine, -nameWidth, -1, 0x20FFFFFF, false);
-
-                // --- PASS 2: Render in front of walls (bright) ---
-                GlStateManager.enableDepth();
-                GlStateManager.depthMask(true);
-
-                font.drawString(singleLine, -nameWidth, -1, 0xFFFFFFFF, false);
+                addBackgroundQuad(wr, badgeHalfWidth, -11);
             }
+            tessellator.draw();
+            GlStateManager.enableTexture2D();
 
-            GlStateManager.enableDepth();
+            font.drawString(primaryLine, -primaryHalfWidth, 0, 0x20FFFFFF);
+            if (hasBadge) {
+                font.drawString(badgeLine, -badgeHalfWidth, -11, 0x20FFFFFF);
+            }
+        } finally {
             GlStateManager.depthMask(true);
             GlStateManager.enableLighting();
             GlStateManager.disableBlend();
+            GlStateManager.enableTexture2D();
             GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
             GlStateManager.popMatrix();
-        } catch (Exception ignored) {}
+        }
+    }
+
+    private void addBackgroundQuad(WorldRenderer wr, int halfWidth, int yTop) {
+        wr.pos((double) (-halfWidth - 1), (double) (yTop - 1), 0.0D).color(0.0F, 0.0F, 0.0F, 0.25F).endVertex();
+        wr.pos((double) (-halfWidth - 1), (double) (yTop + 8), 0.0D).color(0.0F, 0.0F, 0.0F, 0.25F).endVertex();
+        wr.pos((double) (halfWidth + 1), (double) (yTop + 8), 0.0D).color(0.0F, 0.0F, 0.0F, 0.25F).endVertex();
+        wr.pos((double) (halfWidth + 1), (double) (yTop - 1), 0.0D).color(0.0F, 0.0F, 0.0F, 0.25F).endVertex();
     }
 }

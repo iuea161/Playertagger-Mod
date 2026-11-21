@@ -12,6 +12,12 @@ public class TaggedPlayer {
     private long addedTime;
     private boolean isShared;   // true if synced from cloud
 
+    private transient String cachedBadge;
+    private transient String cachedFormattedName;
+    private transient String cachedFormattedIconName;
+    private transient String cachedTabPrefix;
+    private transient String cachedTabSubInfo;
+
     public TaggedPlayer() {}
 
     public TaggedPlayer(String name, String gameMode, String customInfo, String colorCode, String icon, String category, int threatLevel, boolean isShared) {
@@ -26,12 +32,21 @@ public class TaggedPlayer {
         this.isShared = isShared;
     }
 
+    private void invalidateCache() {
+        this.cachedBadge = null;
+        this.cachedFormattedName = null;
+        this.cachedFormattedIconName = null;
+        this.cachedTabPrefix = null;
+        this.cachedTabSubInfo = null;
+    }
+
     public String getName() {
         return name;
     }
 
     public void setName(String name) {
         this.name = name;
+        invalidateCache();
     }
 
     public String getUuid() {
@@ -48,6 +63,7 @@ public class TaggedPlayer {
 
     public void setGameMode(String gameMode) {
         this.gameMode = gameMode == null ? "" : gameMode.trim();
+        invalidateCache();
     }
 
     public String getCustomInfo() {
@@ -56,6 +72,7 @@ public class TaggedPlayer {
 
     public void setCustomInfo(String customInfo) {
         this.customInfo = customInfo == null ? "" : customInfo.trim();
+        invalidateCache();
     }
 
     public String getColorCode() {
@@ -64,6 +81,7 @@ public class TaggedPlayer {
 
     public void setColorCode(String colorCode) {
         this.colorCode = colorCode;
+        invalidateCache();
     }
 
     public String getIcon() {
@@ -71,7 +89,8 @@ public class TaggedPlayer {
     }
 
     public void setIcon(String icon) {
-        this.icon = icon;
+        this.icon = icon == null ? "" : icon.trim();
+        invalidateCache();
     }
 
     public String getCategory() {
@@ -107,52 +126,115 @@ public class TaggedPlayer {
     }
 
     /**
-     * Builds the overhead sub-badge line.
-     * e.g. "§c[☠ BedWars - 3.4 Reach Cheater]§r"
+     * Builds (and caches) the overhead sub-badge line.
+     * e.g. "§c[☠ BedWars • 3.4 Reach]§r"
      */
     public String getFormattedBadge() {
+        String cached = this.cachedBadge;
+        if (cached != null) return cached;
+
+        String color = getColorCode();
+        String trimmedMode = gameMode == null ? "" : gameMode.trim();
+        String trimmedInfo = customInfo == null ? "" : customInfo.trim();
+        String trimmedIcon = icon == null ? "" : icon.trim();
+
         StringBuilder content = new StringBuilder();
-        
-        if (gameMode != null && !gameMode.trim().isEmpty()) {
-            content.append(gameMode.trim());
+        if (!trimmedMode.isEmpty()) {
+            content.append(trimmedMode);
         }
-        if (customInfo != null && !customInfo.trim().isEmpty()) {
+        if (!trimmedInfo.isEmpty()) {
             if (content.length() > 0) {
                 content.append(" • ");
             }
-            content.append(customInfo.trim());
+            content.append(trimmedInfo);
         }
 
+        String result;
         if (content.length() == 0) {
-            if (icon != null && !icon.trim().isEmpty()) {
-                return colorCode + "[" + icon.trim() + "]§r";
+            result = trimmedIcon.isEmpty() ? "" : color + "[" + trimmedIcon + "]§r";
+        } else {
+            StringBuilder sb = new StringBuilder(content.length() + 16);
+            sb.append(color).append("[");
+            if (!trimmedIcon.isEmpty()) {
+                sb.append(trimmedIcon).append(" ");
             }
-            return "";
+            sb.append(content).append("]§r");
+            result = sb.toString();
         }
 
-        StringBuilder sb = new StringBuilder();
-        sb.append(colorCode).append("[");
-        if (icon != null && !icon.trim().isEmpty()) {
-            sb.append(icon.trim()).append(" ");
-        }
-        sb.append(content).append("]§r");
-        return sb.toString();
+        this.cachedBadge = result;
+        return result;
     }
 
     /**
-     * Formats player name in their chosen color.
+     * Formats (and caches) player name in their chosen color.
      */
     public String getFormattedName() {
-        return getColorCode() + name + "§r";
+        String cached = this.cachedFormattedName;
+        if (cached != null) return cached;
+
+        String result = getColorCode() + name + "§r";
+        this.cachedFormattedName = result;
+        return result;
+    }
+
+    /**
+     * Formats (and caches) icon + colored player name for single-line nametag modes.
+     */
+    public String getFormattedIconName() {
+        String cached = this.cachedFormattedIconName;
+        if (cached != null) return cached;
+
+        String trimmedIcon = icon == null ? "" : icon.trim();
+        String result = trimmedIcon.isEmpty()
+                ? getFormattedName()
+                : getColorCode() + trimmedIcon + " " + name + "§r";
+        this.cachedFormattedIconName = result;
+        return result;
     }
 
     /**
      * Prefix for Tab-List.
      */
     public String getTabPrefix() {
-        if (icon != null && !icon.trim().isEmpty()) {
-            return getColorCode() + "[" + icon.trim() + "] ";
+        String cached = this.cachedTabPrefix;
+        if (cached != null) return cached;
+
+        String trimmedIcon = icon == null ? "" : icon.trim();
+        String result = trimmedIcon.isEmpty()
+                ? getColorCode()
+                : getColorCode() + "[" + trimmedIcon + "] ";
+        this.cachedTabPrefix = result;
+        return result;
+    }
+
+    /**
+     * Cached extra tab-list suffix (e.g. " §7[§cBedWars • 3.4 Reach§7]§r") or empty string.
+     */
+    public String getFormattedTabSubInfo() {
+        String cached = this.cachedTabSubInfo;
+        if (cached != null) return cached;
+
+        String trimmedMode = getGameMode();
+        String trimmedInfo = getCustomInfo();
+        String result;
+        if (trimmedMode.isEmpty() && trimmedInfo.isEmpty()) {
+            result = "";
+        } else {
+            StringBuilder sb = new StringBuilder(32);
+            sb.append(" §7[").append(getColorCode());
+            if (!trimmedMode.isEmpty()) {
+                sb.append(trimmedMode);
+            }
+            if (!trimmedInfo.isEmpty()) {
+                if (!trimmedMode.isEmpty()) sb.append(" • ");
+                sb.append(trimmedInfo);
+            }
+            sb.append("§7]§r");
+            result = sb.toString();
         }
-        return getColorCode();
+
+        this.cachedTabSubInfo = result;
+        return result;
     }
 }
